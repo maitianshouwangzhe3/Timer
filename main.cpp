@@ -1,6 +1,7 @@
 
 #include "minheap.h"
 #include "rbtree.h"
+#include "zkiplist.h"
 
 #include <cstdint>
 #include <iostream>
@@ -12,6 +13,7 @@
 enum TimeType {
     MIN_HEAP,
     RBTREE,
+    ZKIPLIST,
 };
 
 extern "C"{
@@ -33,6 +35,11 @@ struct TimeNodeRb {
     CallBack cb;
 };
 
+struct TimeNodeZp {
+    zskiplistNode env; 
+    CallBack cb;   
+};
+
 class Timer {
 public:
     Timer(uint32_t size);
@@ -52,11 +59,14 @@ private:
     void AddMinHeapTimer(uint64_t time, CallBack cb);
 
     void AddRbtreeTimer(uint64_t time, CallBack cb);
+
+    void AddZskiplistTimer(uint64_t time, CallBack cb);
 private:
     min_heap* _heap;
     rbtree*   _rbtree;
     bool _close;
     TimeType _Type;
+    zskiplist* _zskiplist;
 };
 
 Timer::Timer(uint32_t size) {
@@ -76,6 +86,8 @@ Timer::Timer(uint32_t size, TimeType Type) {
             rbtree_init(_rbtree, _rbtree->sentinel);
         }
         break;
+    case ZKIPLIST:
+        _zskiplist = zslCreate();
     }
     _close = false;
     _Type = Type;
@@ -83,12 +95,15 @@ Timer::Timer(uint32_t size, TimeType Type) {
 
 Timer::~Timer() {
     switch (_Type) {
-    case MIN_HEAP:
-        min_heap_free(_heap);
+        case MIN_HEAP:
+            min_heap_free(_heap);
         break;
-    case RBTREE:
-        delete _rbtree->sentinel;
-        delete _rbtree;      
+        case RBTREE:
+            delete _rbtree->sentinel;
+            delete _rbtree;      
+        break;
+        case ZKIPLIST:
+            zslFree(_zskiplist);
         break;
     }
 }
@@ -100,6 +115,9 @@ int Timer::addTimer(uint64_t time, CallBack cb) {
         break;
     case RBTREE:
         AddRbtreeTimer(time, cb);
+        break;
+        case ZKIPLIST:
+        AddZskiplistTimer(time, cb);
         break;
     }
     return 0;
@@ -150,6 +168,24 @@ void Timer::run() {
                     sleep = node->key - now; 
                 }
             }
+            case ZKIPLIST: {
+                zskiplistNode* node = zslMin(_zskiplist);
+                if(!node) {
+                    break;
+                }
+
+                if(node->score <= now) {
+                    zslDeleteHead(_zskiplist);
+                    TimeNodeZp* n = container_of(node, TimeNodeZp, env);
+                    if(n) {
+                        n->cb();
+                        zslDeleteNode(&n->env);
+                        delete n;
+                    }
+                }else {
+                    sleep = node->score - now; 
+                }
+            }
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(sleep));
@@ -175,9 +211,17 @@ void Timer::AddRbtreeTimer(uint64_t time, CallBack cb) {
     rbtree_insert(_rbtree, &node->env);
 }
 
+void Timer::AddZskiplistTimer(uint64_t time, CallBack cb) {
+    TimeNodeZp* node = new TimeNodeZp();
+    node->env.score = GetNowTime() + time;
+    node->env.level = (zskiplistLevel*)zslCreateLevel(zslRandomLevel());
+    node->cb = cb;
+    zslInsert(_zskiplist, &node->env);
+}
+
 int main(int, char**){
 
-    Timer timer(0, RBTREE);
+    Timer timer(0, ZKIPLIST);
 
     auto now = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch());
