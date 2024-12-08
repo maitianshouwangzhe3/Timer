@@ -1,5 +1,6 @@
 
 #include "minheap.h"
+#include "rbtree.h"
 
 #include <cstdint>
 #include <iostream>
@@ -7,6 +8,11 @@
 #include <chrono>
 #include <ctime>
 #include <thread>
+
+enum TimeType {
+    MIN_HEAP,
+    RBTREE,
+};
 
 extern "C"{
 #define offsetofs(s,m) (size_t)(&reinterpret_cast<const volatile char&>((((s*)0)->m)))
@@ -22,9 +28,15 @@ struct TimeNode {
     CallBack cb;
 };
 
+struct TimeNodeRb {
+    rbtree_node env;
+    CallBack cb;
+};
+
 class Timer {
 public:
     Timer(uint32_t size);
+    Timer(uint32_t size, TimeType Type);
     Timer() = delete;
     ~Timer();
 
@@ -36,9 +48,15 @@ public:
 
 private:
     uint64_t GetNowTime();
+
+    void AddMinHeapTimer(uint64_t time, CallBack cb);
+
+    void AddRbtreeTimer(uint64_t time, CallBack cb);
 private:
     min_heap* _heap;
+    rbtree*   _rbtree;
     bool _close;
+    TimeType _Type;
 };
 
 Timer::Timer(uint32_t size) {
@@ -46,15 +64,44 @@ Timer::Timer(uint32_t size) {
     _close = false;
 }
 
+Timer::Timer(uint32_t size, TimeType Type) {
+    switch (Type) {
+    case  MIN_HEAP:
+        min_heap_init(&_heap, size);
+        break;
+    case RBTREE:
+        _rbtree = new rbtree();
+        if(_rbtree) {
+            _rbtree->sentinel = new rbtree_node();
+            rbtree_init(_rbtree, _rbtree->sentinel);
+        }
+        break;
+    }
+    _close = false;
+    _Type = Type;
+}
+
 Timer::~Timer() {
-    min_heap_free(_heap);
+    switch (_Type) {
+    case MIN_HEAP:
+        min_heap_free(_heap);
+        break;
+    case RBTREE:
+        delete _rbtree->sentinel;
+        delete _rbtree;      
+        break;
+    }
 }
 
 int Timer::addTimer(uint64_t time, CallBack cb) {
-    TimeNode* node = new TimeNode();
-    node->env.time = GetNowTime() + time;
-    node->cb = cb;
-    min_heap_push(_heap, &node->env);
+    switch (_Type) {
+    case MIN_HEAP:
+        AddMinHeapTimer(time, cb);
+        break;
+    case RBTREE:
+        AddRbtreeTimer(time, cb);
+        break;
+    }
     return 0;
 }
 
@@ -67,34 +114,70 @@ uint64_t Timer::GetNowTime() {
 
 void Timer::run() {
     while(!_close) {
+        uint64_t sleep = 50;
         uint64_t now = GetNowTime();
-        timer_entry* entry = nullptr;
-        if(!min_heap_top(_heap, &entry)) {
-            if(entry->time <= now) {
-                if(!min_heap_pop(_heap, &entry)) {
-                    TimeNode* node = container_of(entry, TimeNode, env);
-                    if(node) {
-                        node->cb();
-                    }
+        switch (_Type) {
+            case MIN_HEAP: {
+                timer_entry *entry = nullptr;
+                if (!min_heap_top(_heap, &entry)) {
+                    if (entry->time <= now) {
+                        if (!min_heap_pop(_heap, &entry)) {
+                            TimeNode *node = container_of(entry, TimeNode, env);
+                            if (node) {
+                                node->cb();
+                            }
 
-                    delete node;
+                            delete node;
+                        }
+                    } else {
+                        sleep = entry->time - now;
+                    }
                 }
-            } else {
-                std::this_thread::sleep_for(std::chrono::milliseconds(entry->time - now));
+            }
+            case RBTREE: {
+                rbtree_node* node = rbtree_min(_rbtree);
+                if(!node) {
+                    break;
+                }
+
+                if(node->key <= now) {
+                    rbtree_delete(_rbtree, node);
+                    TimeNodeRb* n = container_of(node, TimeNodeRb, env);
+                    n->cb();
+
+                    delete n;
+                } else {
+                    sleep = node->key - now; 
+                }
             }
         }
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        std::this_thread::sleep_for(std::chrono::milliseconds(sleep));
     }
 }
+
 
 void Timer::stop() {
     _close = true;
 }
 
+void Timer::AddMinHeapTimer(uint64_t time, CallBack cb) {
+    TimeNode* node = new TimeNode();
+    node->env.time = GetNowTime() + time;
+    node->cb = cb;
+    min_heap_push(_heap, &node->env);
+}
+
+void Timer::AddRbtreeTimer(uint64_t time, CallBack cb) {
+    TimeNodeRb* node = new TimeNodeRb();
+    node->env.key = GetNowTime() + time;
+    node->cb = cb;
+    rbtree_insert(_rbtree, &node->env);
+}
+
 int main(int, char**){
 
-    Timer timer(10);
+    Timer timer(0, RBTREE);
 
     auto now = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch());
